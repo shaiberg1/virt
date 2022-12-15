@@ -1,0 +1,53 @@
+#!/bin/bash
+
+set -e
+
+mkdir -p cloud_images
+mkdir -p qcow_images
+
+if [ ! -f  cloud_images/jammy-server-cloudimg-amd64.img ]; then
+    wget https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img -P cloud_images/
+fi
+cp cloud_images/jammy-server-cloudimg-amd64.img qcow_images/pc.qcow2
+qemu-img resize qcow_images/pc.qcow2 16G
+
+cat << EOF > cloud-config-pc
+#cloud-config
+hostname: pc
+disable_root: true
+ssh_pwauth: true
+users:
+  - name: ubuntu
+    lock_passwd: false
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: users, admin
+    home: /home/ubuntu
+    shell: /bin/bash
+    plain_text_passwd: 'ubuntu'
+power_state:
+    delay: now
+    mode: poweroff
+    message: Powering off
+    timeout: 2
+    condition: true
+EOF
+
+cloud-localds -v pc-seed.qcow2 cloud-config-pc
+
+qemu-system-x86_64 -s \
+	-nographic \
+	-serial stdio -m 4G \
+	-drive file=qcow_images/pc.qcow2,if=virtio,format=qcow2 \
+	-drive file=pc-seed.qcow2,if=virtio,format=raw \
+	-machine pc \
+	-enable-kvm -cpu host,migratable=no,+tsc,+tsc-deadline,+rdtscp,+invtsc,+monitor \
+	-object memory-backend-ram,size=4G,merge=off,prealloc=on,id=m0 \
+	-device e1000,netdev=net0 \
+	-netdev user,id=net0,hostfwd=tcp:0.0.0.0:2222-:22 \
+	-smp 4,sockets=1,maxcpus=4 \
+	-numa node,nodeid=0,cpus=0-3,memdev=m0 \
+	-rtc clock=host \
+	-qmp tcp:localhost:4443,server,nowait \
+	-vnc localhost:5900
+
+rm pc-seed.qcow2 cloud-config-pc

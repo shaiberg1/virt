@@ -1,0 +1,135 @@
+#!/bin/bash
+
+CUR_USR=$USER
+
+if [ "$EUID" -eq 0 ]
+then
+    CUR_USR=$SUDO_USER
+fi
+
+
+USAGE="Usage: `basename $0` -i IMAGE_FILE [-k BZIMAGE] [-b] [-g] [-c <num_cpus>] [-m <mem>]
+where:
+    -b              run with 2MiB huge pages
+    -g              run with 1GiB huge pages
+    -c <num_cpus>   specify num cpus
+    -m <mem>        memory in GiB"
+
+MEM_SIZE=8
+NUM_CPUS=8
+
+# Opts
+OPT_HUGE=0
+IMAGE=
+BZIMAGE=
+KERNEL=
+APPEND=()
+
+while getopts ghbm:c:i:k: opt; do
+    case $opt in
+        h)
+            printf "$USAGE\n" >&2
+            exit 0
+            ;;
+        b)
+            OPT_HUGE=1              #For 2MiB huge pages
+            ;;
+        g)
+            OPT_HUGE=2              #For 1GiB huge pages
+            ;;
+        c)
+            NUM_CPUS=$((${OPTARG})) #Number of CPUs
+            ;;
+        m)
+            MEM_SIZE=$((${OPTARG})) #Mem size
+            ;;
+        i)
+            IMAGE=$OPTARG           #Image to run
+            ;;
+        k)
+            BZIMAGE=$OPTARG         #kernel BZimage
+            ;;
+       \?)
+            # getopts issues an error message
+            printf "$USAGE\n" >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [ -z $IMAGE ]
+then
+    echo "Please supply image: -i <my-image.img>"
+    exit
+fi
+
+if [ ! -z $BZIMAGE ]
+then
+    KERNEL="-kernel $BZIMAGE "
+    APPEND=('-append' 'nokaslr norandmaps root=/dev/vda1 console=ttyS0 earlyprintk=serial,ttyS0 ignore_loglevel printk_delay=0 systemd.unified_cgroup_hierarchy=1 nopku')
+fi
+
+# Init for Qemu
+echo never | sudo tee /sys/kernel/mm/transparent_hugepage/enabled
+MEMORY="-object memory-backend-ram,size=${MEM_SIZE}G,merge=off,prealloc=on,id=m0"
+
+# Free old huge pages if there are any
+echo 0 | sudo tee /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages
+echo 0 | sudo tee /sys/devices/system/node/node0/hugepages/hugepages-1048576kB/nr_hugepages
+
+sudo umount /hugepages
+
+if (( $OPT_HUGE != 0 )); then
+    MEMORY="-object memory-backend-file,size=${MEM_SIZE}G,merge=off,mem-path=/hugepages,prealloc=on,id=m0"
+    sudo mkdir /hugepages
+	if (( $OPT_HUGE == 2 )); then
+		echo "run huge memory 1G"
+		NUM_HUGE=$((${MEM_SIZE}))
+		echo $NUM_HUGE | sudo tee /sys/devices/system/node/node0/hugepages/hugepages-1048576kB/nr_hugepages
+		sudo mount -t hugetlbfs -o pagesize=1G none /hugepages
+	else
+		echo "run huge memory 2M"
+		NUM_HUGE=$(((${MEM_SIZE} * 1024)/2))
+		echo $NUM_HUGE | sudo tee /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages
+		sudo mount -t hugetlbfs -o pagesize=2M none /hugepages
+	fi
+    sudo chown -R $CUR_USR:$CUR_USR /hugepages
+fi
+
+NUM_CPUS_MAX_STR="-$(( $NUM_CPUS - 1 ))"
+
+# Run Qemu
+sudo numactl --physcpubind 0${NUM_CPUS_MAX_STR} --membind 0 \
+qemu-system-x86_64 -s -name debug-threads=on \
+-nographic \
+-serial stdio -m ${MEM_SIZE}G \
+-machine pc \
+-enable-kvm -cpu host,migratable=no,+tsc,+tsc-deadline,+rdtscp,+invtsc,+monitor \
+$MEMORY \
+-device e1000,netdev=net0 \
+-drive file=$IMAGE,if=virtio,format=qcow2 \
+-netdev user,id=net0,hostfwd=tcp:0.0.0.0:2222-:22 \
+-smp ${NUM_CPUS},sockets=1,maxcpus=${NUM_CPUS} \
+-numa node,nodeid=0,cpus=0${NUM_CPUS_MAX_STR},memdev=m0 \
+-rtc clock=host \
+-qmp tcp:localhost:4444,server,nowait \
+-vnc localhost:5900 \
+$KERNEL \
+"${APPEND[@]}"
+
+#
+#sleep 2
+#
+#PID_LIST=`sudo ps -axH -o tid,ucmd | grep KVM | grep CPU`
+#CUR_CPU=0
+#
+#while IFS= read -r line; do
+#    LINE=`echo ${line##*( )} | cut -f 1 -d " "`
+#    echo "$LINE + $CUR_CPU"
+#	sudo taskset -cp $CUR_CPU $LINE
+#	CUR_CPU=$((CUR_CPU+1))
+#
+#done <<< "$PID_LIST"
+#
+
+
