@@ -98,6 +98,8 @@ fi
 
 NUM_CPUS_MAX_STR="-$(( $NUM_CPUS - 1 ))"
 
+helper_scripts/pin_qemu.sh ${NUM_CPUS} &
+
 # Run Qemu
 sudo numactl --physcpubind 0${NUM_CPUS_MAX_STR} --membind 0 \
 qemu-system-x86_64 -s -name debug-threads=on \
